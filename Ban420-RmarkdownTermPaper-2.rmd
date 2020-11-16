@@ -1,0 +1,238 @@
+# Buy and sell candidates on Oslo Børs
+
+## Filtered on RSI and moving average
+
+### *By Håvard, Bendik og Eirik*
+
+```{r, include=FALSE}
+library(tidyquant)
+library(tidyverse)
+library(rvest)
+library(XML)
+library(httr)
+library(magrittr)
+library(xts)
+library(TTR)
+library(ggplot2)
+library(rmarkdown)
+```
+
+
+```{r, include=FALSE}
+
+# This is a function that downloads new stock prices from the OBX-index, runs a calculation on them, and prints out sale- and buy-candidates 
+#  based on the technical indicators RSI and moving average. 
+
+
+# Include=FALSE makes this code block invisible when exporting to a html-file
+
+# Cleaning the data -----
+
+# List of companies in OBX
+
+# Get URL
+url <- read_html("https://no.wikipedia.org/wiki/OBX-indeksen")
+
+#Get table from wikipedia, xpath is found by inspecting element
+OBX <- url %>% 
+  html_nodes(xpath = '//*[@id="mw-content-text"]/div[1]/table[1]') %>% 
+  html_table()
+
+#selecting column ticker symbols from table
+OBX <- as.data.frame(OBX) %>% 
+  select("Tickersymbol")
+
+# OBX stocks are listed as TICKERNAME.OL on Yahoo Finance. 
+# Removing "OSE: "
+
+OBX <- gsub("OSE: ", "", OBX$Tickersymbol)
+
+OBX <- as.data.frame(OBX) 
+
+# Adding ".OL"
+OBX$OL <- ".OL"
+
+OBX <- paste0(OBX$OBX, OBX$OL)
+
+# Using the tidyquant package to extract the latest pricedata 
+# on the OBX stocks from Yahoo Finance with getsymbols-function
+
+#setting "todays" date in code to system date
+today <- Sys.Date()
+
+#twelve months from today
+from.date <- today %m+% months(-12)
+
+# Function below using lapply to put stock data in a list
+pricedata.OBX <- lapply(OBX, function(x) {
+  outdata <- getSymbols(x, 
+                    from = from.date, 
+                    to = today, 
+                    warnings = FALSE,
+                    auto.assign = FALSE)
+  outdata <- data.frame(dates = index(outdata), coredata(outdata))
+  return(outdata)
+})
+
+# Putting all data into same data frame and filtering
+
+#Removing NAs
+pricedata.OBXd <- na.omit(as.data.frame(pricedata.OBX))
+
+#selecting dates and closing price columns
+pricedata.OBX <- pricedata.OBXd %>% 
+  select("dates", 
+         contains("Close"))
+
+#transforming to time series, because RSI-function requires xts
+pricedata.OBX <- xts(pricedata.OBX[,-1], 
+                     order.by=as.Date(pricedata.OBX[,1], 
+                                      "%m/%d/%Y"))
+
+# ------
+####################################################################
+# Creating an empty matrix
+rsi.OBX <- matrix(0, 
+                  nrow = nrow(pricedata.OBX), 
+                  ncol = length(OBX)+1, 
+                  index(pricedata.OBX))
+
+#converting to data.frame
+rsi.OBX <- as.data.frame(rsi.OBX)
+
+#creating dates column into the new data.frame
+rsi.OBX[,1] <- pricedata.OBXd$dates
+
+#for loop with RSI-function and saving results in rsi.OBX data.frame
+for (i in 1:ncol(pricedata.OBX)) {
+  rsi.OBX[,i+1] <- 
+    RSI(pricedata.OBX[,i])
+}
+
+#### Moving average
+
+## Code below has same approach as rsi over
+ma.OBX <- matrix(0, 
+                 nrow = nrow(pricedata.OBX), 
+                 ncol = length(OBX)+1, 
+                 index(pricedata.OBX))
+
+ma.OBX <- as.data.frame(ma.OBX)
+
+ma.OBX[,1] <- pricedata.OBXd$dates
+
+for (i in 1:ncol(pricedata.OBX)) {
+  ma.OBX[,i+1] <-
+    rollmean(pricedata.OBX[,i], 
+                      100, #number of days going into the calculation of moving average
+                      fill = list(NA, NULL, NA), 
+                      align = "right")
+}
+
+# converting back to a data.frame
+pricedata.OBX <- as.data.frame(pricedata.OBX)
+
+# Making empty lists, to insert our results
+rsi.list <- list()
+price.ma.list <- list()
+
+
+```
+
+Down below you will find charts with stock tickers that meet the requirements of being a good buy or sell
+
+```{r, echo=FALSE, warning=FALSE, getSymbols.warning4.0 = FALSE}
+#echo=FALSE removes code from output, but leaves tables
+#warning=FALSE removes warning messages
+# getSymbols.warning4.0 = FALSE removes warning messages from getSymbols
+
+# Down below is two for loops searching for candidates within our set target of buy and sell signals.
+# if-function checks if latest price for each stock i is higher than the moving average
+# and if rsi is below a set number, here 40. This will trigger a "buy" signal
+# if rsi is higher than our set number. Otherwise, if rsi is higher than our set number of 60, 
+# this triggers a "sell" signal.
+# If a stock gets a trigger, the stock will be plotted and put in a list.
+
+for(i in 1:length(OBX)){
+  if(pricedata.OBX[nrow(pricedata.OBX),i] > 
+     ma.OBX[nrow(ma.OBX), i+1] & 
+     rsi.OBX[nrow(rsi.OBX), i+1] < 40){
+    a <- eval(substitute(ggplot(rsi.OBX)+
+                           geom_line(data = rsi.OBX,
+                                     aes(x = rsi.OBX$V1,
+                                         y = rsi.OBX[,i+1]))+
+                           ylim(c(15,85))+
+                           geom_hline(yintercept = c(30,70), 
+                                      col = "red", 
+                                      linetype = "dotted")+
+                           ggtitle(paste("RSI-graf for", OBX[i]))+
+                           xlab("Dato")+
+                           ylab("RSI")+
+                           theme_bw(),
+                         list(i = i)))
+    
+    print(paste0(OBX[i]," har utløst et kjopssignal. Prisen er over moving average og RSI er på ", 
+        rsi.OBX[nrow(rsi.OBX), i+1]))
+    print(a)
+    rsi.list[[i]] <- a
+    
+    b <- eval(substitute(ggplot(pricedata.OBX)+
+                           geom_line(data = pricedata.OBX,
+                                     aes(x = ma.OBX$V1,
+                                         y = pricedata.OBX[,i]))+
+                           geom_line(data = ma.OBX, 
+                                     aes(x = ma.OBX$V1, 
+                                         y = ma.OBX[,i+1]),
+                                         col = "green")+
+                           ggtitle(paste("Moving average-graf for", OBX[i]))+
+                           xlab("Dato")+
+                           ylab("Pris")+
+                           theme_bw(),
+                         list(i = i)))
+    print(b)
+    price.ma.list[[i]] <- b
+    
+  } else if(pricedata.OBX[nrow(pricedata.OBX),i] >
+            ma.OBX[nrow(ma.OBX), i+1] & 
+            rsi.OBX[nrow(rsi.OBX), i+1] > 60) {
+    
+    c <- eval(substitute(ggplot(rsi.OBX)+
+                           geom_line(data = rsi.OBX,
+                                     aes(x = rsi.OBX$V1,
+                                         y = rsi.OBX[,i+1]))+
+                           ylim(c(15,85))+
+                           geom_hline(yintercept = c(30,70), 
+                                      col = "red", 
+                                      linetype = "dotted")+
+                           ggtitle(paste("RSI-graf for", OBX[i]))+
+                           xlab("Dato")+
+                           ylab("RSI")+
+                           theme_bw(),
+                         list(i = i)))
+    
+    print(paste0(OBX[i]," har utløst et salgssignal. Prisen er over moving average og RSI er på ", rsi.OBX[nrow(rsi.OBX), i+1]))
+    print(c)
+    rsi.list[[i]] <- c
+    
+    d <- eval(substitute(ggplot(pricedata.OBX)+
+                           geom_line(data = pricedata.OBX,
+                                     aes(x = ma.OBX$V1,
+                                         y = pricedata.OBX[,i]))+
+                           geom_line(data = ma.OBX, 
+                                     aes(x = ma.OBX$V1, 
+                                         y = ma.OBX[,i+1]),
+                                     col = "green")+
+                           ggtitle(paste("Moving average-graf for", OBX[i]))+
+                           xlab("Dato")+
+                           ylab("Pris")+
+                           theme_bw(),
+                         list(i = i)))
+    print(d)
+    price.ma.list[[i]] <- d
+  }}
+```
+
+
+
+
+
